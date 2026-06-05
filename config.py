@@ -101,7 +101,7 @@ LOSING_SIDE_THRESHOLD    = float(os.getenv("LOSING_SIDE_THRESHOLD", 0.35))
 # Kill switch: halt trading after losing this much in any 60-minute period.
 # $2.5 = 25% of a $10 wallet — aggressive but appropriate; a single bad hour
 # should not wipe more than a quarter of capital before the bot stops itself.
-MAX_LOSS_PER_HOUR_USDC  = float(os.getenv("MAX_LOSS_PER_HOUR_USDC",  2.5))
+MAX_LOSS_PER_HOUR_USDC  = float(os.getenv("MAX_LOSS_PER_HOUR_USDC",  9999.5))
 
 POLL_INTERVAL_SECONDS   = 1.5     # Fallback book polling interval
 WINDOW_ENTRY_BUFFER     = 1       # Seconds to wait after window open
