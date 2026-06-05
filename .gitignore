@@ -1,0 +1,64 @@
+# Environment files with credentials
+.env.instance1
+.env.instance2
+.env.instance3
+.env.*
+
+# But keep templates
+!.env.instance*
+!.env.paper
+!.env.live.example
+
+*.jsonl
+
+!exits_tos.jsonl
+!fills_tos.jsonl
+
+user_data/
+user_data_new/
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+.phase35_tos.pids
+.phase35_tos.pids_recorder
+btcbot_pm_daemon.log.*
+btcbot_binance_daemon.log.*
+captures/

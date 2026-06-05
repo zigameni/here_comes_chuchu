@@ -1,0 +1,12 @@
+# ── Original bot deps ──────────────────────────────────────────────────────────
+py-clob-client-v2>=0.1.0
+python-dotenv>=1.0.0
+websockets>=12.0
+aiohttp>=3.9.0
+web3>=6.0.0
+eth-account>=0.10.0
+loguru>=0.7.0
+
+# ── Phase 1 additions: Binance ZMQ daemon + IPC layer ─────────────────────────
+pyzmq>=26.0.0           # ZeroMQ Python bindings
+msgpack>=1.0.8          # Binary serialization (faster than JSON)
