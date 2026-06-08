@@ -586,7 +586,7 @@ def main():
             print(f"\n  Equity Curve (left→right, chronological exits):")
             print(f"  ${mn_eq:+.2f} ┤{spark}├ ${mx_eq:+.2f}")
 
-    # ────────────────────â─────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     # 9. TOP WINNERS & LOSERS
     # ─────────────────────────────────────────────────────────────────────────
     header("9. TOP WINNERS & LOSERS")
@@ -594,6 +594,7 @@ def main():
     by_pnl = sorted(exits, key=lambda e: e.get("pnl", 0))
 
     def print_exit_table(label, rows):
+        print(f"\n  {label}")
         print(f"  {'Market (truncated)':<22} {'Side':>5} {'Entry':>7} {'Exit':>7} {'PnL':>9} {'PnL%':>7} {'Reason'}")
         for e in rows:
             print(f"  {e.get('market_id','')[:20]:<22} "
@@ -609,7 +610,7 @@ def main():
 
     # ─────────────────────────────────────────────────────────────────────────
     # 10. DATA-DRIVEN SUGGESTIONS
-    # ───────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
     header("10. DATA-DRIVEN IMPROVEMENT SUGGESTIONS")
 
     suggestions = []
@@ -634,7 +635,7 @@ def main():
                 suggestions.append(
                     "⚠  Kelly Fraction is negative — strategy has negative EV. "
                     "Revisit model calibration before sizing up.")
-            elif 0elly < 0.05:
+            elif 0 < kelly < 0.05:
                 suggestions.append(
                     f"⚠  Kelly Fraction is only {kelly*100:.1f}%. Edge is very thin — consider "
                     "raising the minimum edge threshold (e.g., to 0.10+) to be more selective.")
@@ -645,7 +646,8 @@ def main():
         stale_pct  = pct(stale_500, len(fv_ages))
         if avg_fv_age > 300:
             suggestions.append(
-                f"⚠  Mean FV age at entry is {avg_fv_age:.0f}ms — relatively stale. "         "Add a filter: skip entries where fv_age_ms > 250ms.")
+                f"⚠  Mean FV age at entry is {avg_fv_age:.0f}ms — relatively stale. "
+                "Add a filter: skip entries where fv_age_ms > 250ms.")
         if stale_pct > 10:
             suggestions.append(
                 f"⚠  {stale_pct:.1f}% of entries have FV age > 500ms. "
@@ -668,7 +670,7 @@ def main():
     up_n   = sum(1 for f in fills if f.get("side") == "UP")
     down_n = sum(1 for f in fills if f.get("side") == "DOWN")
     if up_n > 0 and down_n > 0:
-      ratio = max(up_n, down_n) / min(up_n, down_n)
+        ratio = max(up_n, down_n) / min(up_n, down_n)
         if ratio > 2.5:
             dom = "UP" if up_n > down_n else "DOWN"
             suggestions.append(
@@ -679,7 +681,7 @@ def main():
     if hedged_markets:
         suggestions.append(
             f"ℹ  {len(hedged_markets)} markets have both UP and DOWN fills — "
-     evaluate whether the hedged positions cancel edge or provide genuine diversification.")
+            "evaluate whether the hedged positions cancel edge or provide genuine diversification.")
 
     # Multi-fill sizing
     if multi_fill and len(multi_fill) > len(fills_by_mid) * 0.2:
@@ -690,7 +692,7 @@ def main():
     # Open positions
     if open_pos:
         suggestions.append(
-            f"ℹ  {len(open_poopen positions (${open_cost:.2f} total) have no recorded exit. "
+            f"ℹ  {len(open_pos)} open positions (${open_cost:.2f} total) have no recorded exit. "
             "Ensure exits are captured or settlements have been processed.")
 
     # Max loss streak
@@ -703,7 +705,7 @@ def main():
         print(f"\n  {i:>2}. {s}")
 
     if not suggestions:
-        prt("\n  ✅  No major issues found — metrics look healthy for this session.")
+        print("\n  ✅  No major issues found — metrics look healthy for this session.")
 
     sep()
     print("  Analysis complete.")
