@@ -474,12 +474,10 @@ class SmartPaperTrader:
         
         if self._is_replay:
             replay_addr = _resolve_addr(Channel.REPLAY_STREAM)
-            self._replay_sub = ctx.socket(zmq.SUB)
-            # Replay often runs at max speed and must be lossless.
-            self._replay_sub.set_hwm(0)
-            
+            self._replay_sub = ctx.socket(zmq.PULL)
+            # Use backpressure instead of infinite queue
+            self._replay_sub.set_hwm(10000)
             self._replay_sub.connect(replay_addr)
-            self._replay_sub.setsockopt(zmq.SUBSCRIBE, b"")
             self._ready_sock = ctx.socket(zmq.PUSH)
             self._ready_sock.connect(_resolve_addr(Channel.REPLAY_READY))
         else:
@@ -539,8 +537,8 @@ class SmartPaperTrader:
         # when LIVE_TRADING=True.
         self._exchange: Optional[object] = None
 
-        self._fills_file = FILLS_PATH.open("a")
-        self._exits_file = EXITS_PATH.open("a")
+        self._fills_file = FILLS_PATH.open("a", buffering=1)
+        self._exits_file = EXITS_PATH.open("a", buffering=1)
 
         log.info(
             "SmartPaperTrader ready -- "
@@ -687,7 +685,7 @@ class SmartPaperTrader:
                             self.replay_stats["fv_received"],
                             self.replay_stats["pm_received"],
                         )
-                        self._ready_sock.send(b"EOF_ACK")
+                        await self._ready_sock.send(b"EOF_ACK")
                         stop_event.set()
                         break
                     elif ch == Channel.FV_STREAM:
@@ -718,7 +716,7 @@ class SmartPaperTrader:
         
         if self._is_replay:
             tasks.append(asyncio.create_task(drain_replay()))
-            self._ready_sock.send(b"READY")
+            await self._ready_sock.send(b"READY")
         else:
             # CRITICAL: Use unified drain to eliminate async race conditions
             tasks.append(asyncio.create_task(drain_unified()))
@@ -736,6 +734,16 @@ class SmartPaperTrader:
             )
         self._fills_file.close()
         self._exits_file.close()
+        
+        if self._is_replay:
+            self._replay_sub.close(linger=0)
+            self._ready_sock.close(linger=0)
+        else:
+            self._fv_sub.close(linger=0)
+            self._pm_sub.close(linger=0)
+            
+        self._ctx.destroy(linger=0)
+            
         log.info("SmartPaperTrader stopped.")
         self._print_status(final=True)
 

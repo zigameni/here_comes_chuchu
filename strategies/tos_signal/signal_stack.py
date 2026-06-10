@@ -20,15 +20,37 @@ Concretely:
   momentum=UP,   imbalance=UP    →  "UP"   (both agree)
 
 DO NOT change signal thresholds or gate logic here without updating
-tests/strategies/test_tos_signal_strategy.py and progress.md.
+tests/test_smart_paper_trader.py and progress.md.
+
+Threshold values (BTC_MOMENTUM_GATE, ORDERBOOK_IMBALANCE_GATE,
+SIGNAL_MIN_LIQUIDITY) are read from environment variables so the
+optimizer can override them per-run.  Defaults preserve original behaviour.
 """
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from strategies.base import FVState, PMState
+
+# ── Tunable signal-stack thresholds ───────────────────────────────────────────
+# These were previously hardcoded literals.  They are now read from environment
+# variables so the optimizer can override them per-run without code changes.
+# Defaults match the original hardcoded values exactly.
+
+# BTC displacement from strike (as a fraction of K) required for the momentum
+# signal to fire.  0.0004 = 0.04% of K.
+BTC_MOMENTUM_GATE: float = float(os.getenv("BTC_MOMENTUM_GATE", "0.0004"))
+
+# Minimum directional liquidity skew of combined PM depth before the imbalance
+# signal fires.  0.40 = 40% skew toward one side.
+ORDERBOOK_IMBALANCE_GATE: float = float(os.getenv("ORDERBOOK_IMBALANCE_GATE", "0.40"))
+
+# Minimum combined PM depth (liq_up + liq_down) required before the imbalance
+# signal is evaluated.  Below this the book is too thin to trust.
+SIGNAL_MIN_LIQUIDITY: float = float(os.getenv("SIGNAL_MIN_LIQUIDITY", "20.0"))
 
 
 class SignalStack:
@@ -43,7 +65,7 @@ class SignalStack:
         """
         BTC displacement from strike with 30-second persistence gate.
 
-        Gate 1 — magnitude: |delta_now| >= 0.0004 (0.04% of K).
+        Gate 1 — magnitude: |delta_now| >= BTC_MOMENTUM_GATE (default 0.04% of K).
         Gate 2 — persistence: BTC must have been on the same side of K 30s ago.
 
         Returns "UP", "DOWN", or None.
@@ -55,7 +77,7 @@ class SignalStack:
         delta_30s = (btc_30s_ago - pm_K) / pm_K    # displacement from K 30s ago
 
         # Gate 1 — magnitude
-        if abs(delta_now) < 0.0004:
+        if abs(delta_now) < BTC_MOMENTUM_GATE:
             return None
 
         # Gate 2 — persistence: same side of K 30s ago
@@ -68,19 +90,20 @@ class SignalStack:
         """
         Orderbook liquidity imbalance gate.
 
-        Requires >= 20 shares combined (not 500 per side) and >=40% directional
-        skew of combined depth before a signal fires.
+        Requires >= SIGNAL_MIN_LIQUIDITY shares combined (default 20) and
+        >= ORDERBOOK_IMBALANCE_GATE directional skew (default 40%) of combined
+        depth before a signal fires.
 
         Returns "UP", "DOWN", or None.
         """
         total_liq = pm.liq_up + pm.liq_down
-        if total_liq < 20.0:
+        if total_liq < SIGNAL_MIN_LIQUIDITY:
             return None
 
         imbalance = (pm.liq_up - pm.liq_down) / total_liq
-        if imbalance > 0.40:
+        if imbalance > ORDERBOOK_IMBALANCE_GATE:
             return "UP"
-        if imbalance < -0.40:
+        if imbalance < -ORDERBOOK_IMBALANCE_GATE:
             return "DOWN"
         return None
 
