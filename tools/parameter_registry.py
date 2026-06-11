@@ -96,6 +96,26 @@ PARAMETERS: Dict[str, Dict[str, Any]] = {
         "group": "entry_gate",
         "note": "Model z-score conviction gate. Can be tuned independently of TOS_MIN_PROB.",
     },
+    "TOS_MAX_STRIKE_CROSSES": {
+        "type": "int",
+        "default": 999,
+        "min": 5,
+        "max": 50,
+        "step": 5,
+        "tune": True,
+        "group": "entry_gate",
+        "note": "Maximum allowed strike crosses during the window before aborting trading.",
+    },
+    "TOS_MIN_EFFICIENCY_RATIO": {
+        "type": "float",
+        "default": 0.0,
+        "min": 0.0,
+        "max": 0.5,
+        "step": 0.05,
+        "tune": True,
+        "group": "entry_gate",
+        "note": "Minimum efficiency ratio (net movement / path length) required.",
+    },
 
     # ── Entry gate — pre-strategy layer ──────────────────────────────────────
     # (cmd/smart_paper_trader.py module-level env vars)

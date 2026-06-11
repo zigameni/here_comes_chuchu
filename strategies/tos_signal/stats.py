@@ -50,6 +50,7 @@ class TOSSignalStats:
 
     tos_candidates:        int = 0
     rejected_btc_history:  int = 0
+    rejected_chaos:        int = 0   # rejected by chaos metrics (crosses or eff ratio)
     rejected_momentum:     int = 0   # per-signal None counter (not exclusive)
     rejected_imbalance:    int = 0   # per-signal None counter (not exclusive)
     rejected_consensus:    int = 0   # both signals None → no view
@@ -60,6 +61,7 @@ class TOSSignalStats:
         """Reset all counters on window transition."""
         self.tos_candidates        = 0
         self.rejected_btc_history  = 0
+        self.rejected_chaos        = 0
         self.rejected_momentum     = 0
         self.rejected_imbalance    = 0
         self.rejected_consensus    = 0
@@ -71,6 +73,7 @@ class TOSSignalStats:
         return {
             "tos_candidates":        self.tos_candidates,
             "rejected_btc_history":  self.rejected_btc_history,
+            "rejected_chaos":        self.rejected_chaos,
             "rejected_momentum":     self.rejected_momentum,
             "rejected_imbalance":    self.rejected_imbalance,
             "rejected_consensus":    self.rejected_consensus,

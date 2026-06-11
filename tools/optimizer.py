@@ -90,6 +90,8 @@ def main():
     parser.add_argument("--output-dir", type=str, required=True)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--min-train-sharpe", type=float, default=0.0)
+    parser.add_argument("--stage", choices=["all", "filter", "train_val"], default="all")
+    parser.add_argument("--top-n", type=int, default=10)
 
     args = parser.parse_args()
 
@@ -128,13 +130,14 @@ def main():
     val_merged = out_dir / "val_merged.jsonl"
     filter_merged = out_dir / "filter_merged.jsonl"
     
-    log.info("Merging train files...")
-    _merge_captures(train_files, train_merged)
-    log.info("Merging val files...")
-    _merge_captures(val_files, val_merged)
-    if filter_files:
-        log.info("Merging filter files...")
-        _merge_captures(filter_files, filter_merged)
+    if args.stage != "train_val":
+        log.info("Merging train files...")
+        _merge_captures(train_files, train_merged)
+        log.info("Merging val files...")
+        _merge_captures(val_files, val_merged)
+        if filter_files:
+            log.info("Merging filter files...")
+            _merge_captures(filter_files, filter_merged)
     
     rng = random.Random(args.seed)
     
@@ -210,6 +213,11 @@ def main():
                 return row
             else:
                 log.info(f"[{run_id}] PASSED filter stage! (pnl=${f_metrics['net_pnl']}, sharpe={f_metrics['sharpe']}, trades={f_metrics['total_trades']})")
+
+        if args.stage == "filter":
+            row["train_skipped"] = True
+            row["val_skipped"] = True
+            return row
 
         # Stage 2: Train
         log.info(f"[{run_id}] Stage 2: Running train backtest...")
@@ -301,7 +309,57 @@ def main():
             writer.writerow({k: row.get(k, "") for k in fieldnames})
 
     # Execution paths
-    if args.mode in ["random", "grid"]:
+    if args.stage == "train_val":
+        log.info(f"Running train_val stage for top {args.top_n} configs...")
+        if not csv_path.exists():
+            log.error("No optimization_results.csv found. Run filter stage first.")
+            return
+            
+        with open(csv_path, "r") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            
+        # Filter rows that passed the filter stage
+        valid_rows = []
+        for r in rows:
+            try:
+                pnl = float(r.get("filter_net_pnl", 0) or 0)
+                if pnl > 0:
+                    valid_rows.append(r)
+            except ValueError:
+                pass
+                
+        # Sort by filter_sharpe
+        valid_rows.sort(key=lambda x: float(x.get("filter_sharpe", 0) or 0), reverse=True)
+        top_rows = valid_rows[:args.top_n]
+        
+        stage2_csv = out_dir / "optimization_results_stage2.csv"
+        if not stage2_csv.exists():
+            with open(stage2_csv, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                
+        log.info("Merging train and val files for train_val stage...")
+        _merge_captures(train_files, train_merged)
+        _merge_captures(val_files, val_merged)
+                
+        for i, row in enumerate(top_rows):
+            log.info(f"--- Top {i+1}/{len(top_rows)} (run_id: {row['run_id']}) ---")
+            params = {k: float(row[k]) if PARAMETERS[k]["type"] == "float" else int(row[k]) for k in param_keys if k in row and row[k]}
+            
+            run_id = row["run_id"]
+            timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            
+            new_row = evaluate_params(params, run_id, timestamp, "train_val", row.get("seed", ""))
+            
+            with open(stage2_csv, "a", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writerow({k: new_row.get(k, "") for k in fieldnames})
+
+        best_csv_path = out_dir / "best_results_stage2.csv"
+        _write_best_results(stage2_csv, best_csv_path)
+
+    elif args.mode in ["random", "grid"]:
         grid_iterator = grid_points() if args.mode == "grid" else None
         
         for i in range(args.n_iter):
@@ -343,7 +401,13 @@ def main():
             
             return row.get("train_sharpe", -99.0)
 
-        study = optuna.create_study(direction="maximize")
+        db_path = out_dir / "optuna_study.db"
+        study = optuna.create_study(
+            storage=f"sqlite:///{db_path}",
+            study_name="btc_bot_optimization",
+            load_if_exists=True,
+            direction="maximize"
+        )
         log.info(f"Starting Bayesian Optimization for {args.n_iter} trials...")
         study.optimize(objective, n_trials=args.n_iter)
         
@@ -351,8 +415,9 @@ def main():
         log.info(f"Best trial: {study.best_trial.number} with train_sharpe: {study.best_trial.value}")
 
     # Finalize
-    best_csv_path = out_dir / "best_results.csv"
-    _write_best_results(csv_path, best_csv_path)
+    if args.stage != "train_val":
+        best_csv_path = out_dir / "best_results.csv"
+        _write_best_results(csv_path, best_csv_path)
     
     if train_merged.exists(): train_merged.unlink()
     if val_merged.exists(): val_merged.unlink()

@@ -34,6 +34,7 @@ from strategies.base import BaseStrategy, EntrySignal, FVState, PMState, Positio
 from strategies.tos.strategy import TOSStrategy
 from strategies.tos_signal.signal_stack import SignalStack
 from strategies.tos_signal.stats import TOSSignalStats
+from strategies.tos_signal.config import TOS_MAX_STRIKE_CROSSES, TOS_MIN_EFFICIENCY_RATIO
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +67,13 @@ class TOSSignalStrategy(BaseStrategy):
         # Per-window signal gate stats
         self._stats = TOSSignalStats()
 
+        # Chaos tracking variables
+        self._strike_crosses: int = 0
+        self._path_length: float = 0.0
+        self._first_price: Optional[float] = None
+        self._prev_side: Optional[str] = None
+        self._prev_tick_price: Optional[float] = None
+
     @property
     def name(self) -> str:
         return "TOS_SIGNAL"
@@ -82,8 +90,32 @@ class TOSSignalStrategy(BaseStrategy):
         too short for the 30s momentum window.
         """
         ts_s = fv.ts_ms / 1000.0
+        btc_price = float(fv.btc_price)
+        
+        # ── Chaos Metrics Update ──
+        if self._first_price is None:
+            self._first_price = btc_price
+            
+        if self._prev_tick_price is not None:
+            self._path_length += abs(btc_price - self._prev_tick_price)
+            
+        self._prev_tick_price = btc_price
+        
+        if btc_price > fv.strike:
+            side = "UP"
+        elif btc_price < fv.strike:
+            side = "DOWN"
+        else:
+            side = self._prev_side
+            
+        if self._prev_side is not None and side != self._prev_side:
+            self._strike_crosses += 1
+            
+        self._prev_side = side
+
+        # ── Downsampled BTC History Update ──
         if not self._btc_history or (ts_s - self._btc_history[-1][0]) >= _BTC_HISTORY_SAMPLE_S:
-            self._btc_history.append((ts_s, float(fv.btc_price)))
+            self._btc_history.append((ts_s, btc_price))
 
     def evaluate_entry(self, fv: FVState, pm: PMState) -> List[EntrySignal]:
         """
@@ -103,6 +135,26 @@ class TOSSignalStrategy(BaseStrategy):
 
         tos_signal = tos_signals[0]  # TOS returns at most one signal per tick
         self._stats.tos_candidates += 1
+
+        # ── Stage 1.5: Chaos Checks ──────────────────────────────────────────
+        net_movement = abs(fv.btc_price - self._first_price) if self._first_price is not None else 0.0
+        efficiency_ratio = (net_movement / self._path_length) if self._path_length > 0 else 1.0
+
+        if self._strike_crosses > TOS_MAX_STRIKE_CROSSES:
+            self._stats.rejected_chaos += 1
+            log.debug(
+                "TOS_SIGNAL REJECT %s — chaotic market (%d crosses > %d limit)",
+                tos_signal.side, self._strike_crosses, TOS_MAX_STRIKE_CROSSES
+            )
+            return []
+
+        if efficiency_ratio < TOS_MIN_EFFICIENCY_RATIO:
+            self._stats.rejected_chaos += 1
+            log.debug(
+                "TOS_SIGNAL REJECT %s — chaotic market (eff_ratio %.3f < %.3f limit)",
+                tos_signal.side, efficiency_ratio, TOS_MIN_EFFICIENCY_RATIO
+            )
+            return []
 
         # ── Stage 2: BTC history availability ────────────────────────────────
         now_s      = pm.ts_ms / 1000.0
@@ -199,6 +251,11 @@ class TOSSignalStrategy(BaseStrategy):
         """Reset all per-window counters on window transition."""
         self._tos.reset_for_market()
         self._stats.reset_for_market()
+        self._strike_crosses = 0
+        self._path_length = 0.0
+        self._first_price = None
+        self._prev_side = None
+        self._prev_tick_price = None
 
     def get_diagnostics(self) -> Dict[str, Any]:
         """
