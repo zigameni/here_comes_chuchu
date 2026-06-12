@@ -263,6 +263,96 @@ class Exchange:
                 logger.error(f"place_fok_buy failed: {e}")
                 return False
 
+    async def place_limit_sell(
+        self,
+        token_id:  str,
+        price:     float,
+        size:      float,
+        tick_size: str = DEFAULT_TICK_SIZE,
+    ) -> Optional[str]:
+        """
+        Place a GTC limit sell. Returns order_id or None on failure.
+
+        Pre-validates against CLOB minimums before sending to avoid 400 errors:
+          - price * size >= MIN_ORDER_NOTIONAL ($1 USDC)
+          - size >= MIN_ORDER_SHARES (5 shares)
+        """
+        notional = round(price * size, 4)
+        if notional < MIN_ORDER_NOTIONAL:
+            logger.debug(
+                f"  skip limit sell: notional ${notional:.4f} < ${MIN_ORDER_NOTIONAL} "
+                f"(price={price} size={size})"
+            )
+            return None
+        if size < MIN_ORDER_SHARES:
+            logger.debug(
+                f"  skip limit sell: size {size} < {MIN_ORDER_SHARES} shares"
+            )
+            return None
+
+        async with self._order_sem:
+            try:
+                args = OrderArgs(
+                    token_id = token_id,
+                    price    = round(price, 4),
+                    size     = float(math.floor(size)), # Force to whole number
+                    side     = Side.SELL,
+                )
+                resp = await self._run_client(
+                    self._client.create_and_post_order,
+                    order_args  = args,
+                    options     = PartialCreateOrderOptions(tick_size=tick_size),
+                    order_type  = OrderType.GTC,
+                )
+                order_id = resp.get("orderID") or resp.get("order_id")
+                logger.debug(
+                    f"  limit sell placed: token={token_id[:8]}… "
+                    f"price={price} size={size} notional=${notional:.2f} id={order_id}"
+                )
+                return order_id
+            except Exception as e:
+                logger.error(f"place_limit_sell failed: {e}")
+                return None
+
+    async def place_fok_sell(
+        self,
+        token_id:  str,
+        price:     float,
+        size:      float,
+        tick_size: str = DEFAULT_TICK_SIZE,
+    ) -> bool:
+        """
+        Place a FOK (Fill-Or-Kill) limit sell at a specific price.
+        Returns True if filled.
+        """
+        notional = round(price * size, 4)
+        if notional < MIN_ORDER_NOTIONAL or size < MIN_ORDER_SHARES:
+            logger.debug(f"  skip FOK sell: notional=${notional:.4f} size={size}")
+            return False
+
+        async with self._order_sem:
+            try:
+                args = OrderArgs(
+                    token_id = token_id,
+                    price    = round(price, 4),
+                    size     = round(size,  2),
+                    side     = Side.SELL,
+                )
+                resp = await self._run_client(
+                    self._client.create_and_post_order,
+                    order_args  = args,
+                    options     = PartialCreateOrderOptions(tick_size=tick_size),
+                    order_type  = OrderType.FOK,
+                )
+                status = resp.get("status", "")
+                filled = status in ("matched", "filled", "MATCHED", "FILLED")
+                if not filled:
+                    logger.warning(f"FOK sell not filled: status={status} resp={resp}")
+                return filled
+            except Exception as e:
+                logger.error(f"place_fok_sell failed: {e}")
+                return False
+
     async def place_bulk_limit_buys(
         self,
         orders: list[dict],

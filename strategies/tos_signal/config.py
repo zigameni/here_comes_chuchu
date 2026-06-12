@@ -24,8 +24,7 @@ from strategies.tos.config import (   # noqa: F401  (re-export for callers)
 )
 import os
 
-TOS_MAX_STRIKE_CROSSES: int = int(os.getenv("TOS_MAX_STRIKE_CROSSES", "999"))
-TOS_MIN_EFFICIENCY_RATIO: float = float(os.getenv("TOS_MIN_EFFICIENCY_RATIO", "0.0"))
+TOS_MIN_VARIANCE_RATIO: float = float(os.getenv("TOS_MIN_VARIANCE_RATIO", "1.0"))
 
 __all__ = [
     "TOS_ENTRY_START_S",
@@ -35,6 +34,5 @@ __all__ = [
     "TOS_MIN_LIQUIDITY",
     "TOS_Z_THRESHOLD",
     "EXIT_POLICY",
-    "TOS_MAX_STRIKE_CROSSES",
-    "TOS_MIN_EFFICIENCY_RATIO",
+    "TOS_MIN_VARIANCE_RATIO",
 ]

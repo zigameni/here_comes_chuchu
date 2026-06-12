@@ -130,6 +130,10 @@ def main():
                              "produce an inflated Sharpe that passes the gate. "
                              "Defaults to 0 (disabled); recommended: ~3x --min-filter-trades "
                              "since the train window is typically 3x longer than the filter.")
+    parser.add_argument("--reset-study", action="store_true",
+                        help="Delete the existing Optuna study DB before starting. "
+                             "Required when the objective function has changed, otherwise old "
+                             "trial scores pollute the surrogate model.")
 
     args = parser.parse_args()
 
@@ -510,53 +514,134 @@ def main():
             run_id = str(uuid.uuid4())[:8]
             timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
             log.info(f"--- Optuna Trial {trial.number} ({run_id}) ---")
-            
+
             params = suggest_optuna(trial)
             row = evaluate_params(params, run_id, timestamp, "bayesian", "")
             save_row(row)
-            
-            # What does Optuna optimize?
-            # We want it to maximize Train Sharpe. If Train Sharpe wasn't reached,
-            # we give it a confidence-penalised Filter Sharpe so it still learns
-            # from the failure — but can't be gamed by 2-trade flukes.
-            # If both failed/errored, return a very bad score.
+
             if row.get("error"):
                 return -999.0
 
-            if row.get("train_skipped"):
-                filter_pnl    = float(row.get("filter_net_pnl", 0) or 0)
-                filter_sharpe = float(row.get("filter_sharpe", 0) or 0)
-                filter_trades = float(row.get("filter_trades", 0) or 0)
-                if filter_pnl <= 0:
-                    return -99.0
-                # Same confidence penalty as the top-N selector
-                confidence = min(1.0, filter_trades / (args.min_filter_trades * 2))
-                return filter_sharpe * confidence
+            # ── Tier 1: Validation completed — the only signal we truly trust ──
+            #
+            # ROOT-CAUSE FIX: the old code returned train_sharpe here, which
+            # scored the one passing trial (train_sharpe=0.07) below many
+            # overfit configs (train_sharpe=0.10-0.18). Optuna learned to move
+            # AWAY from the correct region. We now use val_sharpe directly so
+            # the surrogate model sees the true out-of-sample quality.
+            if not row.get("val_skipped") and row.get("val_sharpe") is not None:
+                val_sharpe       = float(row.get("val_sharpe",   0) or 0)
+                train_sharpe_raw = float(row.get("train_sharpe", 0) or 0)
 
-            train_sharpe = row.get("train_sharpe")
-            if train_sharpe is None:
+                # Penalise heavy Sharpe decay (train → val).
+                # Perfect generalisation (val >= train) gets no penalty.
+                # Decay above 50% is scaled down linearly toward 0.
+                if train_sharpe_raw > 0:
+                    decay = (train_sharpe_raw - val_sharpe) / train_sharpe_raw
+                    generalization_factor = max(0.0, 1.0 - max(0.0, decay - 0.50))
+                else:
+                    # train_sharpe near-zero: val_sharpe is the only real signal
+                    generalization_factor = 0.5
+
+                score = val_sharpe * generalization_factor
+
+                # Large bonus for clearing ALL four validation gates (sharpe>0.3,
+                # win_rate>0.50, pnl>0, decay<50%). This makes the passing region
+                # unmistakably dominant in the surrogate model — the bonus cannot
+                # be matched by any Tier-2 or Tier-3 result.
+                if row.get("passed_validation"):
+                    score += 0.50
+
+                return score
+
+            # ── Tier 2: Train ran, val was skipped (train gate not met) ────────
+            # Return penalised train Sharpe but subtract a large constant so this
+            # tier never outscores a Tier-1 result:
+            #   best possible here ≈ 0.20 – 3.0 = –2.80, well below val-tier min.
+            if not row.get("train_skipped"):
+                train_sharpe = row.get("train_sharpe")
+                if train_sharpe is None:
+                    return -99.0
+                train_trades = float(row.get("train_trades", 0) or 0)
+                _min_train_threshold = (
+                    args.min_train_trades if args.min_train_trades > 0
+                    else max(1, args.min_filter_trades * 2)
+                )
+                train_confidence = min(
+                    1.0, train_trades / max(1, _min_train_threshold * 2)
+                )
+                return float(train_sharpe) * train_confidence - 3.0
+
+            # ── Tier 3: Filter failed (both train and val skipped) ──────────────
+            # Confidence-penalised filter Sharpe, offset so this band is always
+            # below Tier-2:  best case ≈ 0.77 – 10.0 = –9.23.
+            filter_pnl    = float(row.get("filter_net_pnl",  0) or 0)
+            filter_sharpe = float(row.get("filter_sharpe",   0) or 0)
+            filter_trades = float(row.get("filter_trades",   0) or 0)
+            if filter_pnl <= 0:
                 return -99.0
-            # Apply the same confidence penalty used in the gate check so Optuna
-            # can't be gamed by configs that post a huge Sharpe on 2 trades.
-            train_trades = float(row.get("train_trades", 0) or 0)
-            _min_train_threshold = args.min_train_trades if args.min_train_trades > 0 else max(1, args.min_filter_trades * 2)
-            train_confidence = min(1.0, train_trades / max(1, _min_train_threshold * 2))
-            return float(train_sharpe) * train_confidence
-            
-            
+            confidence = min(1.0, filter_trades / (args.min_filter_trades * 2))
+            return filter_sharpe * confidence - 10.0
 
         db_path = out_dir / "optuna_study.db"
+
+        # --reset-study: wipe the old DB when the objective function has changed.
+        # Old trial scores are baked into SQLite and will pollute the surrogate
+        # model if the objective is different — a fresh start is the clean fix.
+        if args.reset_study and db_path.exists():
+            db_path.unlink()
+            log.info(f"--reset-study: cleared old Optuna study DB at {db_path}")
+
         study = optuna.create_study(
             storage=f"sqlite:///{db_path}",
             study_name="btc_bot_optimization",
             load_if_exists=True,
             direction="maximize"
         )
+
+        # Warm-start: re-enqueue any previously validated configs so Optuna
+        # immediately evaluates the known-good neighbourhood under the new
+        # objective, rather than rediscovering it from scratch.
+        # Handles column renames between old CSV exports and the current registry.
+        _col_renames = {
+            "BTC_MOMENTUM_GATE":      "MERTON_DISTANCE_GATE",
+            "ORDERBOOK_IMBALANCE_GATE": "OFI_IMBALANCE_GATE",
+        }
+        if csv_path.exists():
+            _enqueued = 0
+            with open(csv_path, "r") as _f:
+                for _row in csv.DictReader(_f):
+                    if _row.get("passed_validation") != "True":
+                        continue
+                    try:
+                        _norm = {_col_renames.get(k, k): v for k, v in _row.items()}
+                        _params = {
+                            k: (
+                                float(_norm[k])
+                                if PARAMETERS[k]["type"] == "float"
+                                else int(float(_norm[k]))
+                            )
+                            for k in param_keys
+                            if k in _norm and _norm[k] not in ("", None, "nan")
+                        }
+                        study.enqueue_trial(_params)
+                        _enqueued += 1
+                        log.info(
+                            f"Warm-start: enqueued passing config "
+                            f"run_id={_row.get('run_id', '?')}"
+                        )
+                    except Exception as _e:
+                        log.warning(f"Failed to enqueue warm-start row: {_e}")
+            if _enqueued == 0:
+                log.info("No previously validated configs found to warm-start from.")
+            else:
+                log.info(f"Warm-start: {_enqueued} config(s) enqueued.")
+
         log.info(f"Starting Bayesian Optimization for {args.n_iter} trials...")
         study.optimize(objective, n_trials=args.n_iter)
         
         log.info("Optuna Optimization Complete.")
-        log.info(f"Best trial: {study.best_trial.number} with train_sharpe: {study.best_trial.value}")
+        log.info(f"Best trial: {study.best_trial.number} with val_sharpe score: {study.best_trial.value:.4f}")
 
     # Finalize
     if args.stage != "train_val":

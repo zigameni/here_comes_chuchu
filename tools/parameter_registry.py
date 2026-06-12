@@ -90,31 +90,23 @@ PARAMETERS: Dict[str, Dict[str, Any]] = {
         "type": "float",
         "default": 0.524,   # NormalDist().inv_cdf(0.70)
         "min": 0.25,
-        "max": 1.25,
+        "max": 0.70,        # was 1.25 — all 17 trials used ≤0.50; high z-threshold
+                            # wastes search budget and the passing config used 0.30
         "step": 0.05,
         "tune": True,
         "group": "entry_gate",
         "note": "Model z-score conviction gate. Can be tuned independently of TOS_MIN_PROB.",
     },
-    "TOS_MAX_STRIKE_CROSSES": {
-        "type": "int",
-        "default": 999,
-        "min": 5,
-        "max": 50,
-        "step": 5,
-        "tune": True,
-        "group": "entry_gate",
-        "note": "Maximum allowed strike crosses during the window before aborting trading.",
-    },
-    "TOS_MIN_EFFICIENCY_RATIO": {
+    "TOS_MIN_VARIANCE_RATIO": {
         "type": "float",
-        "default": 0.0,
-        "min": 0.0,
-        "max": 0.5,
-        "step": 0.05,
+        "default": 1.0,
+        "min": 1.2,         # was 0.5 — low-VR (mean-reverting) regime produced no
+                            # passing configs; the passer used 1.9 (momentum regime)
+        "max": 2.0,
+        "step": 0.1,
         "tune": True,
         "group": "entry_gate",
-        "note": "Minimum efficiency ratio (net movement / path length) required.",
+        "note": "Minimum Variance Ratio (15s) required. Below 1.0 indicates mean-reverting regime.",
     },
 
     # ── Entry gate — pre-strategy layer ──────────────────────────────────────
@@ -174,7 +166,8 @@ PARAMETERS: Dict[str, Dict[str, Any]] = {
         "type": "float",
         "default": 100.0,
         "min": 0.0,
-        "max": 180.0,
+        "max": 80.0,        # was 180.0 — configs with >80s age gate traded too late
+                            # in the window; passer used 20s for maximum opportunity
         "step": 20.0,
         "tune": True,
         "group": "pre_strategy",
@@ -183,9 +176,11 @@ PARAMETERS: Dict[str, Dict[str, Any]] = {
     "FILL_COOLDOWN_MS": {
         "type": "float",
         "default": 5000.0,
-        "min": 1000.0,
-        "max": 30000.0,
-        "step": 1000.0,
+        "min": 6000.0,      # was 1000.0 — configs with ≤4000ms cooldown took 150+
+                            # trades in train but val sharpe collapsed (0.04-0.09);
+                            # passer used 14000ms (fewer, higher-quality re-entries)
+        "max": 22000.0,     # was 30000.0 — nothing above 16000ms was tried by Optuna
+        "step": 2000.0,     # was 1000.0 — wider step to avoid over-granularity
         "tune": True,
         "group": "pre_strategy",
         "note": "Per-side re-entry cooldown (ms). Prevents rapid re-entry after a fill.",
@@ -272,8 +267,9 @@ PARAMETERS: Dict[str, Dict[str, Any]] = {
     "LATE_TP_BID": {
         "type": "float",
         "default": 0.82,
-        "min": 0.70,
-        "max": 0.92,
+        "min": 0.80,        # was 0.70 — low TP values mean leaving money on the table
+        "max": 0.94,        # was 0.92 — passer was AT the old ceiling (boundary effect);
+                            # extend slightly to confirm it's a true optimum
         "step": 0.02,
         "tune": True,
         "group": "exit",
@@ -323,25 +319,27 @@ PARAMETERS: Dict[str, Dict[str, Any]] = {
     # ── Signal stack — TOS_SIGNAL specific ────────────────────────────────────
     # (strategies/tos_signal/signal_stack.py — promoted to env vars in Step 1)
 
-    "BTC_MOMENTUM_GATE": {
+    "MERTON_DISTANCE_GATE": {
         "type": "float",
-        "default": 0.0004,
-        "min": 0.0001,
-        "max": 0.002,
-        "step": 0.0001,
+        "default": 1.5,
+        "min": 1.25,        # was 0.5 — values below 1.25 never appeared in any Optuna
+                            # trial; passer used 2.25; high displacement = strong momentum
+        "max": 3.0,
+        "step": 0.25,
         "tune": True,
         "group": "signal_stack",
-        "note": "BTC displacement from K (as fraction) required for momentum signal to fire.",
+        "note": "Z-score displacement required for merton momentum signal to fire.",
     },
-    "ORDERBOOK_IMBALANCE_GATE": {
+    "OFI_IMBALANCE_GATE": {
         "type": "float",
-        "default": 0.40,
-        "min": 0.20,
-        "max": 0.60,
-        "step": 0.05,
+        "default": 50.0,
+        "min": 10.0,
+        "max": 70.0,        # was 100.0 — Optuna never tried >60; passer used 30;
+                            # high OFI thresholds likely too rare to generate trades
+        "step": 10.0,
         "tune": True,
         "group": "signal_stack",
-        "note": "Minimum directional liquidity skew (0–1) before imbalance signal fires.",
+        "note": "Minimum OFI skew to trigger orderbook imbalance signal.",
     },
     "SIGNAL_MIN_LIQUIDITY": {
         "type": "float",
