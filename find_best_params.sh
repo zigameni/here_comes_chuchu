@@ -1,13 +1,11 @@
-# Activate the virtual environment
+#!/bin/bash
 source venv/bin/activate
-
-# Create the output directory
 mkdir -p optimization_results
 
-# Run the optimizer in the background (using nohup) so it won't die if you close the terminal
 nohup python -m tools.optimizer \
+  --stage all \
   --mode bayesian \
-  --n-iter 100 \
+  --n-iter 150 \
   --filter-start 2026-06-06 \
   --filter-end 2026-06-06 \
   --train-start 2026-06-05 \

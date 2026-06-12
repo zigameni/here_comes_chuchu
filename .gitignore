@@ -63,3 +63,5 @@ btcbot_pm_daemon.log.*
 btcbot_binance_daemon.log.*
 captures/
 btcbot_smart_paper_trader.log.*
+optimization_results/
+other_stuf

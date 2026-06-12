@@ -49,6 +49,28 @@ def _merge_captures(files: list[Path], output_path: Path):
             ev.pop("_line_no", None)
             out.write(json.dumps(ev) + "\n")
 
+def _count_capture_markets(capture_path: Path) -> int:
+    """
+    Scan a merged capture JSONL and return the number of distinct market_ids.
+    This is the full universe the strategy was exposed to — the correct
+    denominator for participation rate (trades / total_markets).
+    """
+    market_ids = set()
+    with open(capture_path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                ev = json.loads(line)
+                mid = ev.get("market_id")
+                if mid:
+                    market_ids.add(mid)
+            except Exception:
+                pass
+    return len(market_ids)
+
+
 def _write_best_results(input_csv: Path, output_csv: Path, top_n: int = 20):
     if not input_csv.exists():
         return
@@ -92,6 +114,22 @@ def main():
     parser.add_argument("--min-train-sharpe", type=float, default=0.0)
     parser.add_argument("--stage", choices=["all", "filter", "train_val"], default="all")
     parser.add_argument("--top-n", type=int, default=10)
+    parser.add_argument("--min-filter-trades", type=int, default=30,
+                        help="Minimum number of filter-stage trades required.")
+    parser.add_argument("--min-filter-participation", type=float, default=0.1,
+                        help="Minimum fraction of available capture markets that must have been "
+                             "traded for a config to pass the filter gate. E.g. 0.05 means the "
+                             "strategy must have entered at least 5%% of all markets seen in the "
+                             "filter capture. Prevents inflated Sharpe from 2-trade flukes in a "
+                             "288-market universe from passing.")
+    parser.add_argument("--min-train-trades", type=int, default=0,
+                        help="Minimum number of train-stage trades required to proceed to "
+                             "validation. When > 0, the train Sharpe is also confidence-penalised "
+                             "by min(1, trades / (2 * min_train_trades)) before being compared to "
+                             "--min-train-sharpe, so a 2-trade fluke over 864 markets cannot "
+                             "produce an inflated Sharpe that passes the gate. "
+                             "Defaults to 0 (disabled); recommended: ~3x --min-filter-trades "
+                             "since the train window is typically 3x longer than the filter.")
 
     args = parser.parse_args()
 
@@ -139,6 +177,18 @@ def main():
             log.info("Merging filter files...")
             _merge_captures(filter_files, filter_merged)
     
+    # Count total distinct markets in each capture once, so the participation-rate
+    # gate inside evaluate_params doesn't have to re-scan the file on every trial.
+    total_filter_markets: int = 0
+    if filter_files and filter_merged.exists():
+        total_filter_markets = _count_capture_markets(filter_merged)
+        log.info(f"Total filter markets available: {total_filter_markets}")
+
+    total_train_markets: int = 0
+    if train_merged.exists():
+        total_train_markets = _count_capture_markets(train_merged)
+        log.info(f"Total train markets available: {total_train_markets}")
+
     rng = random.Random(args.seed)
     
     csv_path = out_dir / "optimization_results.csv"
@@ -211,8 +261,22 @@ def main():
                 row["train_skipped"] = True
                 row["val_skipped"] = True
                 return row
-            else:
-                log.info(f"[{run_id}] PASSED filter stage! (pnl=${f_metrics['net_pnl']}, sharpe={f_metrics['sharpe']}, trades={f_metrics['total_trades']})")
+
+            # Enforce participation rate: reject configs that only took 1-2 lucky
+            # trades out of ~288 available markets — their Sharpe is meaningless.
+            if args.min_filter_participation > 0 and total_filter_markets > 0:
+                participation = f_metrics["total_trades"] / total_filter_markets
+                if participation < args.min_filter_participation:
+                    log.info(
+                        f"[{run_id}] Failed filter participation: "
+                        f"{f_metrics['total_trades']} trades / {total_filter_markets} markets "
+                        f"= {participation:.3f} < {args.min_filter_participation}. Skipping."
+                    )
+                    row["train_skipped"] = True
+                    row["val_skipped"] = True
+                    return row
+
+            log.info(f"[{run_id}] PASSED filter stage! (pnl=${f_metrics['net_pnl']}, sharpe={f_metrics['sharpe']}, trades={f_metrics['total_trades']})")
 
         if args.stage == "filter":
             row["train_skipped"] = True
@@ -249,9 +313,33 @@ def main():
             row["error"] = train_metrics["error"]
             row["val_skipped"] = True
             return row
-            
-        if train_metrics["sharpe"] < args.min_train_sharpe:
-            log.info(f"[{run_id}] Skipping validation (train_sharpe={train_metrics['sharpe']} < {args.min_train_sharpe})")
+
+        # Confidence-penalised train Sharpe.
+        # run_backtest computes Sharpe only over trades that happened — so 2
+        # winning trades out of 864 markets produce an artificially huge Sharpe
+        # because the ~862 zero-return slots are excluded from the calculation.
+        # We scale the raw Sharpe down by a confidence factor that ramps from 0.5
+        # (at the minimum trade floor) to 1.0 (at 2× the floor), forcing the gate
+        # to reject low-participation configs regardless of their raw Sharpe.
+        _min_train_threshold = args.min_train_trades if args.min_train_trades > 0 else max(1, args.min_filter_trades * 2)
+        train_confidence = min(1.0, train_metrics["total_trades"] / max(1, _min_train_threshold * 2))
+        penalized_train_sharpe = train_metrics["sharpe"] * train_confidence
+
+        # Optional hard minimum-trades gate for the train stage.
+        if args.min_train_trades > 0 and train_metrics["total_trades"] < args.min_train_trades:
+            log.info(
+                f"[{run_id}] Skipping validation: train trades {train_metrics['total_trades']} "
+                f"< --min-train-trades {args.min_train_trades}"
+            )
+            row["val_skipped"] = True
+            return row
+
+        if penalized_train_sharpe < args.min_train_sharpe:
+            log.info(
+                f"[{run_id}] Skipping validation: raw train_sharpe={train_metrics['sharpe']:.3f}, "
+                f"confidence={train_confidence:.3f}, penalized={penalized_train_sharpe:.3f} "
+                f"< --min-train-sharpe {args.min_train_sharpe}"
+            )
             row["val_skipped"] = True
             return row
 
@@ -319,19 +407,57 @@ def main():
             reader = csv.DictReader(f)
             rows = list(reader)
             
-        # Filter rows that passed the filter stage
+        # Filter rows that passed the filter stage.
+        # Hard gate: pnl > 0 AND trade count meets minimum threshold so that
+        # configs with 1-2 lucky trades can't win via inflated Sharpe.
         valid_rows = []
         for r in rows:
             try:
                 pnl = float(r.get("filter_net_pnl", 0) or 0)
-                if pnl > 0:
+                trades = float(r.get("filter_trades", 0) or 0)
+                if pnl > 0 and trades >= args.min_filter_trades:
                     valid_rows.append(r)
             except ValueError:
                 pass
-                
-        # Sort by filter_sharpe
-        valid_rows.sort(key=lambda x: float(x.get("filter_sharpe", 0) or 0), reverse=True)
+
+        log.info(
+            f"{len(valid_rows)} rows passed filter gate "
+            f"(pnl>0, trades>={args.min_filter_trades}) out of {len(rows)} total."
+        )
+
+        # Rank by a confidence-penalised Sharpe so that raw PnL volume is
+        # rewarded alongside risk-adjusted quality.
+        #
+        # confidence  = min(1, trades / min_filter_trades*2)
+        #   → ramps from 0.5 at the minimum trade floor up to 1.0 once the
+        #     config has twice the minimum number of trades.
+        #   → configs with exactly min_filter_trades trades get 0.5× Sharpe;
+        #     those with 2× min_filter_trades (or more) get the full Sharpe.
+        # Primary sort:  penalised_sharpe  (risk-quality × volume confidence)
+        # Tiebreaker:    filter_net_pnl    (absolute dollar return)
+        def _rank_key(r):
+            pnl    = float(r.get("filter_net_pnl", 0) or 0)
+            sharpe = float(r.get("filter_sharpe", 0) or 0)
+            trades = float(r.get("filter_trades", 0) or 0)
+            confidence = min(1.0, trades / (args.min_filter_trades * 2))
+            penalised_sharpe = sharpe * confidence
+            return (penalised_sharpe, pnl)
+
+        valid_rows.sort(key=_rank_key, reverse=True)
         top_rows = valid_rows[:args.top_n]
+
+        log.info("Top-N filter ranking:")
+        for rank, r in enumerate(top_rows, 1):
+            trades     = float(r.get("filter_trades", 0) or 0)
+            sharpe     = float(r.get("filter_sharpe", 0) or 0)
+            pnl        = float(r.get("filter_net_pnl", 0) or 0)
+            confidence = min(1.0, trades / (args.min_filter_trades * 2))
+            log.info(
+                f"  #{rank:>2}  run_id={r['run_id']}  "
+                f"pnl=${pnl:.2f}  sharpe={sharpe:.2f}  trades={int(trades)}  "
+                f"confidence={confidence:.2f}  "
+                f"score={sharpe * confidence:.2f}"
+            )
         
         stage2_csv = out_dir / "optimization_results_stage2.csv"
         if not stage2_csv.exists():
@@ -390,16 +516,34 @@ def main():
             save_row(row)
             
             # What does Optuna optimize?
-            # We want it to maximize Train Sharpe. If Train Sharpe wasn't reached, 
-            # we give it Filter Sharpe (if available) so it can still learn from the failure.
+            # We want it to maximize Train Sharpe. If Train Sharpe wasn't reached,
+            # we give it a confidence-penalised Filter Sharpe so it still learns
+            # from the failure — but can't be gamed by 2-trade flukes.
             # If both failed/errored, return a very bad score.
             if row.get("error"):
                 return -999.0
-            
+
             if row.get("train_skipped"):
-                return row.get("filter_sharpe", -99.0)
+                filter_pnl    = float(row.get("filter_net_pnl", 0) or 0)
+                filter_sharpe = float(row.get("filter_sharpe", 0) or 0)
+                filter_trades = float(row.get("filter_trades", 0) or 0)
+                if filter_pnl <= 0:
+                    return -99.0
+                # Same confidence penalty as the top-N selector
+                confidence = min(1.0, filter_trades / (args.min_filter_trades * 2))
+                return filter_sharpe * confidence
+
+            train_sharpe = row.get("train_sharpe")
+            if train_sharpe is None:
+                return -99.0
+            # Apply the same confidence penalty used in the gate check so Optuna
+            # can't be gamed by configs that post a huge Sharpe on 2 trades.
+            train_trades = float(row.get("train_trades", 0) or 0)
+            _min_train_threshold = args.min_train_trades if args.min_train_trades > 0 else max(1, args.min_filter_trades * 2)
+            train_confidence = min(1.0, train_trades / max(1, _min_train_threshold * 2))
+            return float(train_sharpe) * train_confidence
             
-            return row.get("train_sharpe", -99.0)
+            
 
         db_path = out_dir / "optuna_study.db"
         study = optuna.create_study(
